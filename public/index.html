@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gemini AI Overview Crawler</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --line:#e2e5ea; --text:#1d2330; --muted:#6b7280; --accent:#2563eb;
+          --good:#16a34a; --warn:#d97706; --none:#cbd5e1; --bad:#dc2626; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; gap:16px; padding:14px 24px; background:var(--card); border-bottom:1px solid var(--line); }
+  header h1 { font-size:17px; margin:0; flex:1; }
+  #status { color:var(--muted); font-size:13px; }
+  button { font:inherit; padding:6px 12px; border:1px solid var(--line); border-radius:6px; background:var(--card); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--bad); }
+  button:disabled { opacity:.5; cursor:default; }
+  input, textarea { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; }
+  nav { display:flex; gap:2px; padding:0 24px; background:var(--card); border-bottom:1px solid var(--line); overflow-x:auto; }
+  nav button { border:none; border-bottom:2px solid transparent; border-radius:0; padding:10px 14px; white-space:nowrap; }
+  nav button.active { border-bottom-color:var(--accent); color:var(--accent); font-weight:600; }
+  main { padding:20px 24px; max-width:1300px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .site-head h2 { margin:0; font-size:18px; }
+  .muted { color:var(--muted); }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  th { font-size:12px; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); }
+  tr.term { cursor:pointer; }
+  tr.term:hover { background:#f9fafb; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600; }
+  .yes { background:#dcfce7; color:var(--good); } .no { background:#f1f5f9; color:var(--muted); }
+  .err { background:#fee2e2; color:var(--bad); }
+  .dots { display:flex; gap:3px; }
+  .dot { width:10px; height:10px; border-radius:2px; background:var(--none); cursor:pointer; }
+  .dot.cited { background:var(--good); } .dot.overview { background:var(--warn); } .dot.error { background:var(--bad); }
+  .detail td { background:#fafbfc; }
+  .overview { white-space:pre-wrap; margin:0 0 12px; max-height:400px; overflow:auto; }
+  .refs { margin:0; padding-left:20px; }
+  .refs li.ours { font-weight:600; color:var(--good); }
+  .legend { font-size:12px; color:var(--muted); display:flex; gap:12px; margin-top:8px; }
+  .legend span { display:inline-flex; align-items:center; gap:4px; }
+  .empty { text-align:center; padding:40px; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Gemini AI Overview Crawler</h1>
+  <span id="status"></span>
+  <button class="primary" id="crawl-all">Crawl all now</button>
+</header>
+<nav id="tabs"></nav>
+<main id="main"></main>
+
+<script>
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+const fmt = utc => utc ? new Date(utc.replace(' ', 'T') + 'Z').toLocaleString() : '';
+const api = async (path, opts = {}) => {
+  const res = await fetch('/api' + path, { headers: { 'Content-Type': 'application/json' }, ...opts,
+    body: opts.body && JSON.stringify(opts.body) });
+  if (!res.ok && res.status !== 409) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+  return res.status === 204 ? null : res.json();
+};
+
+let sites = [];
+let activeId = Number(location.hash.slice(1)) || null;
+let openTermId = null;
+let wasRunning = false;
+
+async function loadSites() {
+  sites = await api('/sites');
+  if (!sites.some(s => s.id === activeId)) activeId = sites[0]?.id ?? null;
+  renderTabs();
+  renderMain();
+}
+
+function renderTabs() {
+  $('#tabs').innerHTML = sites.map(s =>
+    `<button data-id="${s.id}" class="${s.id === activeId ? 'active' : ''}">${esc(s.name)}</button>`).join('')
+    + `<button data-id="new" class="${activeId === 'new' ? 'active' : ''}">+ Add site</button>`;
+  $('#tabs').onclick = e => {
+    const id = e.target.dataset.id;
+    if (!id) return;
+    activeId = id === 'new' ? 'new' : Number(id);
+    openTermId = null;
+    location.hash = id === 'new' ? '' : id;
+    renderTabs();
+    renderMain();
+  };
+}
+
+async function renderMain() {
+  if (activeId === 'new' || !sites.length) return renderAddSite();
+  const site = sites.find(s => s.id === activeId);
+  const terms = await api(`/sites/${site.id}/terms`);
+  const citedNow = terms.filter(t => t.latest?.cited).length;
+  const overviewNow = terms.filter(t => t.latest?.has_overview).length;
+
+  $('#main').innerHTML = `
+    <div class="card site-head">
+      <div class="row">
+        <div style="flex:1">
+          <h2>${esc(site.name)}</h2>
+          <div class="muted">${esc(site.domain)} · ${terms.length} terms · AI Overview on ${overviewNow} · cited in ${citedNow}</div>
+        </div>
+        <button class="primary" id="crawl-site">Crawl this site now</button>
+        <button class="danger" id="del-site">Delete site</button>
+      </div>
+    </div>
+    <div class="card">
+      <form id="add-terms" class="row">
+        <textarea name="terms" rows="2" style="flex:1; min-width:260px" placeholder="Add search terms (one per line)"></textarea>
+        <button class="primary">Add terms</button>
+      </form>
+    </div>
+    <div class="card">
+      ${terms.length ? `
+      <table>
+        <thead><tr><th>Search term</th><th>AI Overview</th><th>Site cited</th><th>Mentioned</th><th>Last crawled</th><th>History (last 30, oldest → newest)</th><th></th></tr></thead>
+        <tbody>${terms.map(termRow).join('')}</tbody>
+      </table>
+      <div class="legend">
+        <span><i class="dot cited"></i> cited</span><span><i class="dot overview"></i> overview, not cited</span>
+        <span><i class="dot"></i> no overview</span><span><i class="dot error"></i> error</span>
+      </div>` : '<div class="empty">No search terms yet. Add some above.</div>'}
+    </div>`;
+
+  $('#crawl-site').onclick = () => startCrawl({ site_id: site.id });
+  $('#del-site').onclick = async () => {
+    if (!confirm(`Delete ${site.name} and all its results?`)) return;
+    await api(`/sites/${site.id}`, { method: 'DELETE' });
+    activeId = null;
+    loadSites();
+  };
+  $('#add-terms').onsubmit = async e => {
+    e.preventDefault();
+    await api(`/sites/${site.id}/terms`, { method: 'POST', body: { terms: e.target.terms.value } });
+    renderMain();
+  };
+  $('#main tbody')?.addEventListener('click', onTableClick);
+  if (openTermId) showResult(openTermId, terms.find(t => t.id === openTermId)?.latest?.id);
+}
+
+function termRow(t) {
+  const l = t.latest;
+  const pill = (on, yes = 'Yes', no = 'No') => l ? `<span class="pill ${on ? 'yes' : 'no'}">${on ? yes : no}</span>` : '<span class="muted">–</span>';
+  const dots = [...t.history].reverse().map(h => {
+    const cls = h.error ? 'error' : h.cited ? 'cited' : h.has_overview ? 'overview' : '';
+    return `<i class="dot ${cls}" data-result="${h.id}" title="${esc(fmt(h.crawled_at))}${h.error ? ' – ' + esc(h.error) : ''}"></i>`;
+  }).join('');
+  return `
+    <tr class="term" data-term="${t.id}">
+      <td><strong>${esc(t.term)}</strong></td>
+      <td>${l?.error ? `<span class="pill err" title="${esc(l.error)}">Error</span>` : pill(l?.has_overview)}</td>
+      <td>${pill(l?.cited, l?.cited_position ? `#${l.cited_position}` : 'Yes')}</td>
+      <td>${pill(l?.mentioned)}</td>
+      <td class="muted">${l ? fmt(l.crawled_at) : 'Never'}</td>
+      <td><div class="dots">${dots}</div></td>
+      <td class="row" style="flex-wrap:nowrap">
+        <button data-crawl="${t.id}">Crawl</button>
+        <button class="danger" data-del="${t.id}">✕</button>
+      </td>
+    </tr>
+    <tr class="detail" id="detail-${t.id}" hidden><td colspan="7"></td></tr>`;
+}
+
+async function onTableClick(e) {
+  const { crawl, del, result } = e.target.dataset;
+  const termId = Number(e.target.closest('tr')?.dataset.term);
+  if (crawl) return startCrawl({ term_id: Number(crawl) });
+  if (del) {
+    if (confirm('Delete this term and its history?')) { await api(`/terms/${del}`, { method: 'DELETE' }); renderMain(); }
+    return;
+  }
+  if (!termId) return;
+  if (result) return showResult(termId, Number(result));
+  if (openTermId === termId) { $(`#detail-${termId}`).hidden = true; openTermId = null; return; }
+  const latestDot = e.target.closest('tr').querySelector('.dot:last-child');
+  showResult(termId, latestDot && Number(latestDot.dataset.result));
+}
+
+async function showResult(termId, resultId) {
+  document.querySelectorAll('tr.detail').forEach(r => r.hidden = true);
+  openTermId = termId;
+  const row = $(`#detail-${termId}`);
+  if (!row) return;
+  row.hidden = false;
+  const cell = row.firstElementChild;
+  if (!resultId) { cell.innerHTML = '<span class="muted">Not crawled yet.</span>'; return; }
+  const r = await api(`/results/${resultId}`);
+  const refs = JSON.parse(r.references_json || '[]');
+  cell.innerHTML = `
+    <div class="muted" style="margin-bottom:8px">Result from ${esc(fmt(r.crawled_at))}</div>
+    ${r.error ? `<p class="pill err">${esc(r.error)}</p>` : !r.has_overview ? '<p class="muted">Google showed no AI Overview for this term.</p>' : `
+      <pre class="overview">${esc(r.overview_text)}</pre>
+      <strong>Sources (${refs.length})</strong>
+      <ol class="refs">${refs.map(ref => `<li class="${ref.ours ? 'ours' : ''}">
+        <a href="${esc(ref.link)}" target="_blank" rel="noopener">${esc(ref.title || ref.link)}</a>
+        <span class="muted">${esc(ref.source || '')}</span></li>`).join('')}</ol>`}`;
+}
+
+function renderAddSite() {
+  activeId = 'new';
+  renderTabs();
+  $('#main').innerHTML = `
+    <div class="card">
+      <h2 style="margin-top:0">Add a client site</h2>
+      <form id="add-site" class="row">
+        <input name="name" placeholder="Client / brand name" required>
+        <input name="domain" placeholder="example.co.uk" required>
+        <button class="primary">Add site</button>
+      </form>
+      <p class="muted">The domain is used to detect when the AI Overview cites the client's site (subdomains included). The name is used to detect brand mentions in the summary text.</p>
+    </div>`;
+  $('#add-site').onsubmit = async e => {
+    e.preventDefault();
+    const site = await api('/sites', { method: 'POST', body: { name: e.target.name.value, domain: e.target.domain.value } });
+    activeId = site.id;
+    location.hash = site.id;
+    loadSites();
+  };
+}
+
+async function startCrawl(body) {
+  const r = await api('/crawl', { method: 'POST', body });
+  if (r.error) alert(r.error);
+  wasRunning = true; // so a crawl that finishes before the first poll still refreshes the table
+  pollStatus();
+}
+
+async function pollStatus() {
+  const s = await api('/status');
+  const quota = s.account ? ` · SerpApi: ${s.account.searches_left} searches left` : '';
+  $('#status').textContent = (s.running ? 'Crawling…' : `Last daily crawl: ${s.last_daily_crawl || 'never'} (runs daily at ${s.crawl_hour}:00)`) + quota;
+  $('#crawl-all').disabled = s.running;
+  if (wasRunning && !s.running && activeId !== 'new') renderMain();
+  wasRunning = s.running;
+  if (s.running) setTimeout(pollStatus, 3000);
+}
+
+$('#crawl-all').onclick = () => {
+  if (confirm('Crawl every term for every site now? Each term uses 1–2 SerpApi searches.')) startCrawl({});
+};
+
+loadSites();
+pollStatus();
+</script>
+</body>
+</html>

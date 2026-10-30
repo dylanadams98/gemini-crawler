@@ -1,0 +1,17 @@
+{
+  "name": "gemini-crawler",
+  "version": "1.0.0",
+  "description": "Daily tracker of Google AI Overview (Gemini) results for client sites",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
